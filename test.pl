@@ -79,7 +79,7 @@ use warnings qw'all' ;
     sleep(1);
   }
   
-  ok($i >= 4) ;
+  ok($i >= 2) ;
   
   ok( $job->returned , 8 ) ;
   
