@@ -1,5 +1,11 @@
 Revision history for Perl extension Thread::Isolate.
 
+0.04  2005-02-02
+      - Fixed memory leak for Perl 5.8.4-Win32 for push() and shift() of shared @{ $this->{jobs} }.
+      - Fixed Job destruction in the thread execution side.
+      - Added limit (200) of added jobs in the list and a delay until reduce that.
+
+
 0.03  2005-01-31
       - Added Thread::Isolate::Map. (see POD).
       - Added Thread::Isolate::Pool. (see POD).

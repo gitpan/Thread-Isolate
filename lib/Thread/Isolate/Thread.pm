@@ -229,7 +229,7 @@ sub map_package {
   $this->eval( q`
     use Thread::Isolate::Map ;
     my $target_thi = Thread::Isolate->new( shift(@_) ) ;
-    Thread::Isolate::Map->new(@_ , $target_thi ) ;
+    Thread::Isolate::Map->new(@_ , $target_thi) ;
     return 1 ;
   `
   , $target_thi->id , @_ ) ;
@@ -401,13 +401,16 @@ sub add_job {
   my $the_job ;
   
   {
+    select(undef , undef , undef , 0.1) while @$jobs >= 200 ;
+  
     $the_job = Thread::Isolate::Job->new( $this , $job_type , @_ ) ;
     
     ##print "ADD>> ". $the_job->dump ."\n" ;
   
     lock( @$jobs ) ;
     
-    push(@$jobs , $the_job) ;
+    ##push(@$jobs , $the_job) ;
+    $this->_jobs_push($the_job) ;
     
     cond_signal( @$jobs ) ;
   }
@@ -430,9 +433,54 @@ sub add_job_no_lock {
   my $the_job = Thread::Isolate::Job->new( $this , $job_type , @_ ) ;
   $the_job->set_no_lock ;
   
-  push(@$jobs , $the_job) ;
+  ##push(@$jobs , $the_job) ;
+  $this->_jobs_push($the_job) ;
 
   return $the_job ;
+}
+
+###############
+# _JOBS_SHIFT #
+###############
+
+sub _jobs_shift {
+  my $this = shift ;
+  my ($jobs) = @$this{qw(jobs)} ;
+
+  { lock( @$jobs ) ;
+  
+    my $job ;
+
+    my $i = -1 ;
+    $job = $$jobs[++$i] while !$job && $i <= $#{$jobs} ;
+    $$jobs[$i] = undef ;
+    
+    if ( $i >= 100 ) {
+      my @jobs = () ;
+      push(@jobs , @$jobs) ;
+      
+      @$jobs = map { ($_ ? $_ : ()) } @jobs if @jobs ;
+    }
+    
+    return $job ;
+  }
+}
+
+##############
+# _JOBS_PUSH #
+##############
+
+sub _jobs_push {
+  my $this = shift ;
+  my ( $the_job ) = @_ ;
+  
+  my ($jobs) = @$this{qw(jobs)} ;
+
+  { lock( @$jobs ) ;
+    $$jobs[ $#{$jobs}+1 ] = $the_job ;
+  }
+  
+  return ;
 }
 
 #####################
@@ -444,7 +492,7 @@ sub wait_job_to_start {
   my ( $the_job ) = @_ ;
 
   return if !UNIVERSAL::isa($the_job , 'Thread::Isolate::Job') ;
-  return if ${$this->{status}} <= 0 ;
+  return if $this->tid == threads->self->tid || !$this->exists ;
   
   {
     lock( @$the_job ) ;
@@ -470,10 +518,9 @@ sub wait_job {
   my ( $the_job ) = @_ ;
 
   return if !UNIVERSAL::isa($the_job , 'Thread::Isolate::Job') ;
-  return if ${$this->{status}} <= 0 ;
+  return if $this->tid == threads->self->tid || !$this->exists ;
   
-  {
-    lock( @$the_job ) ;
+  { lock( @$the_job ) ;
 
     return Thread::Isolate::thaw( $$the_job[4] ) if $$the_job[2] == 2 ;
 
@@ -643,6 +690,8 @@ sub DESTROY {
 ##################
 
 $sub_THREAD_ISOLATE = q`
+#line 694 Thread/Isolate/Thread.pm
+
 sub {
   my $this = shift ;
   
@@ -651,6 +700,8 @@ sub {
   $THI_SHARE_TABLE{tid}{$this->{id}} = $this->{tid} ;
   
   ##warn "NEW THR>> $this->{id}\n" ;
+  
+  my $is_mother_thread = $this->{id} == $MOTHER_THREAD ? 1 : undef ;
   
   my ($jobs , $status) = @$this{qw(jobs status)} ;
   
@@ -661,8 +712,7 @@ sub {
   while( $running && $$status > 0 ) {
     lock( @$jobs ) ;
 
-    cond_wait( @$jobs ) if !@$jobs ;
-    #cond_timedwait( @$jobs , time + 2 ) if !@$jobs ;
+    !@$jobs ? ($is_mother_thread ? cond_wait( @$jobs ) : cond_timedwait( @$jobs , time + 2 )) : undef ;
     
     last if $$status <= 0 ;
 
@@ -670,7 +720,9 @@ sub {
     
     next if !@$jobs ;
     
-    my $the_job = pop(@$jobs) ;
+    ## Fix memory leak on Perl-5.8.4 Win32. (shift on shared array only OK for 5.8.6)
+    ##my $the_job = shift(@$jobs) ;
+    my $the_job = $this->_jobs_shift ;
   
     next if !defined $the_job ;
     

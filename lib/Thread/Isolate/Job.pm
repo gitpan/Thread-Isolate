@@ -97,6 +97,33 @@ sub _thi_obj {
   return Thread::Isolate::Thread::new_from_id( $$this[0] ) ;
 }
 
+######
+# ID #
+######
+ 
+sub id {
+  my $this = shift ;
+  return $$this[1] * 1 ;
+}
+
+#######
+# TID #
+#######
+
+sub tid {
+  my $this = shift ;
+  return $Thread::Isolate::Thread::THI_SHARE_TABLE{tid}{$$this[0]} * 1
+}
+
+#########
+# TH_ID #
+#########
+
+sub th_id {
+  my $this = shift ;
+  return $$this[0] * 1 ;
+}
+
 ###########
 # ALIASES #
 ###########
@@ -166,8 +193,11 @@ sub dump {
 sub DESTROY {
   my $this = shift ;
   
+  return if $this->tid == threads->self->tid ;
+  
   { lock( @$this ) ;
     if ( !$$this[2] && $$this[3] ne 'SHUTDOWN' ) {
+      $this->wait ;
       $$this[2] = 2 ;
       $$this[4] = '' ;
     }
