@@ -3,7 +3,7 @@
 ###use Data::Dumper ; print Dumper(  ) ;
 
 use Test;
-BEGIN { plan tests => 11 } ;
+BEGIN { plan tests => 8 } ;
 
 use Thread::Isolate ;
 
@@ -55,37 +55,6 @@ use warnings qw'all' ;
   ok($dump , '$VAR1 = [ 123, 456, 789 ]; ') ;
 
   ok( !$INC{'Data/Dumper.pm'} ) ;
-
-}
-#########################
-{
-
-  my $thi = Thread::Isolate->new() ;
-  
-  my $job = $thi->eval_detached(q`
-    for(1..5) {
-      print "in> $_\n" ;
-      sleep(1);
-    }
-    return 2**3 ;
-  `);
-  
-  $job->wait_to_start ;
-  
-  my $i ;
-  while( $job->is_running ) {
-    ++$i ;
-    print "out> $i\n" ;
-    sleep(1);
-  }
-  
-  ok($i >= 2) ;
-  
-  ok( $job->returned , 8 ) ;
-  
-  $job = undef ;
-  
-  ok( $thi->exists ) ;
 
 }
 #########################

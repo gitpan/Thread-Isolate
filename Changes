@@ -1,5 +1,13 @@
 Revision history for Perl extension Thread::Isolate.
 
+0.03  2005-01-31
+      - Added Thread::Isolate::Map. (see POD).
+      - Added Thread::Isolate::Pool. (see POD).
+      - Fixed memory leack for eval() calls to a thread. (Memory is stable now).
+      - More tests.
+      - Many new resources. (see POD).
+
+
 0.02  2005-01-31
       - Added Mother Thread, that holds cleaner state of Perl, as the generator of all threads.
       - Added support to create Thread::Isolate objects inside other Thread::Isolate. So, is possible

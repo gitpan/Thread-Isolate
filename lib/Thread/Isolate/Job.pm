@@ -13,6 +13,7 @@
 package Thread::Isolate::Job ;
 
 use strict qw(vars) ;
+no warnings ;
 
 #######
 # NEW #
@@ -26,9 +27,9 @@ sub new {
   my $thi = shift ;
   my $job_type = shift ;
 
-  my @the_job : shared ;  
+  my $the_job = Thread::Isolate::Thread::share_new_ref('@') ;
 
-  $this = bless(\@the_job , $class) ;
+  $this = bless($the_job , $class) ;
   
   my ($job_id) = @$thi{qw(job_id)} ;
   
@@ -38,9 +39,37 @@ sub new {
     $id = ++$$job_id ;
   }
   
-  @the_job = ( $thi->{id} , $id , undef , $job_type , Thread::Isolate::freeze(@_) ) ;
+  @$the_job = ( $thi->{id} , $id , undef , $job_type , Thread::Isolate::freeze(@_) ) ;
 
   return $this ;
+}
+
+###############
+# SET_NO_LOCK #
+###############
+
+sub set_no_lock {
+  my $this = shift ;
+  $$this[5] = 1 ;
+}
+
+#################
+# UNSET_NO_LOCK #
+#################
+
+sub unset_no_lock {
+  my $this = shift ;
+  $$this[5] = 0 ;
+}
+
+##############
+# IS_NO_LOCK #
+##############
+
+sub is_no_lock {
+  my $this = shift ;
+  return 1 if $$this[5] ;
+  return ;
 }
 
 #########
@@ -50,11 +79,11 @@ sub new {
 sub clone {
   my $this = shift ;
   
-  my @the_job : shared ;
+  my $the_job = Thread::Isolate::Thread::share_new_ref('@') ;
   
-  my $clone = bless(\@the_job , ref($this)) ;
+  my $clone = bless($the_job , ref($this)) ;
   
-  @the_job = @$this ;
+  @$the_job = @$this ;
   
   return $clone ;
 }

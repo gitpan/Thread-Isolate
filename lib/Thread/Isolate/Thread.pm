@@ -17,7 +17,7 @@ sub job_EVAL {
   no warnings ;
   local( $SIG{__WARN__} ) = sub {} ;
   local($_) = $#_ >= 2 ? [@_[2..$#_]] : [] ;
-  return eval('package main ; @_ = @$_ ; $_ = "" ; ' . "\n#line 1\n" . $_[1]) ;
+  return eval('package main ; @_ = @{$_} ; $_ = "" ; ' . "\n#line 1\n" . $_[1]) ;
 }
 
 ###########################
@@ -28,6 +28,7 @@ package Thread::Isolate::Thread ;
 use 5.008003 ;
 
 use strict qw(vars);
+no warnings ;
 
 ###########
 # REQUIRE #
@@ -46,6 +47,8 @@ use strict qw(vars);
   my $THI_ID : shared ;
   
   use vars qw($MOTHER_THREAD %THI_SHARE_TABLE %THI_THREAD_TABLE) ;
+
+  share($MOTHER_THREAD) ;
   
   share(%THI_SHARE_TABLE) ;
   $THI_SHARE_TABLE{id} = share_new_ref('%') ;
@@ -58,7 +61,7 @@ use strict qw(vars);
 #######################
 
 sub start_mother_thread {
-  return if $MOTHER_THREAD ;
+  return $MOTHER_THREAD if $MOTHER_THREAD ;
   
   my $thim = Thread::Isolate->new() ;
   $thim->{clone} = 1 ;
@@ -96,8 +99,10 @@ sub new {
   $mother_thread = $mother_thread->{id} if ref($mother_thread) && UNIVERSAL::isa($mother_thread , 'Thread::Isolate') ;
   
   if ( $mother_thread && !$args{no_mother_thread} && !defined $internal_level ) {
-    my $thim = Thread::Isolate->new_from_id($MOTHER_THREAD) ;
-    return $thim->new_internal ;
+    my $thim = Thread::Isolate->new_from_id($mother_thread) ;
+    my $thi = $thim->new_internal ;
+    $thi->{clone} = undef if $mother_thread == $MOTHER_THREAD ;
+    return $thi ;
   }
   
   $this = bless(share_new_ref('%') , $class) ;
@@ -212,6 +217,29 @@ sub new_internal {
 
 sub copy { &new_internal ;}
 
+###############
+# MAP_PACKAGE #
+###############
+
+sub map_package {
+  my $this = shift ;
+  
+  my $target_thi = pop(@_) ;
+  
+  $this->eval( q`
+    use Thread::Isolate::Map ;
+    my $target_thi = Thread::Isolate->new( shift(@_) ) ;
+    Thread::Isolate::Map->new(@_ , $target_thi ) ;
+    return 1 ;
+  `
+  , $target_thi->id , @_ ) ;
+  
+  warn( $this->err ) if $this->err ;
+
+  return 1 if !$this->err ;
+  return ;
+}
+
 ########
 # SELF #
 ########
@@ -283,11 +311,21 @@ sub id {
 
 sub is_running_any_job {
   my $this = shift ;
-  my ($job_now) = @$this{qw(job_now)} ;
+  
+  return if !$this->exists ;
+  
+  my ($jobs , $job_now) = @$this{qw(jobs job_now)} ;
+  
   {
     lock( $$job_now ) ;
     return 1 if defined $$job_now ;
   }
+  
+  {
+    lock( @$jobs ) ;
+    return 1 if @$jobs ;
+  }
+  
   return ;
 }
 
@@ -298,10 +336,12 @@ sub is_running_any_job {
 sub is_job_started {
   my $this = shift ;
   my ( $the_job ) = @_ ;
+
   return if !UNIVERSAL::isa($the_job , 'Thread::Isolate::Job') ;
+  return if ${$this->{status}} <= 0 ;
   
   {
-    lock( @$the_job ) ;
+    lock( @$the_job ) if !$the_job->is_no_lock ;
     return 1 if $$the_job[2] >= 1 ;
   }
   
@@ -315,10 +355,12 @@ sub is_job_started {
 sub is_job_running {
   my $this = shift ;
   my ( $the_job ) = @_ ;
+
   return if !UNIVERSAL::isa($the_job , 'Thread::Isolate::Job') ;
+  return if ${$this->{status}} <= 0 ;
   
   {
-    lock( @$the_job ) ;
+    lock( @$the_job ) if !$the_job->is_no_lock ;
     return 1 if $$the_job[2] == 1 ;
   }
   
@@ -332,10 +374,12 @@ sub is_job_running {
 sub is_job_finished {
   my $this = shift ;
   my ( $the_job ) = @_ ;
+
   return if !UNIVERSAL::isa($the_job , 'Thread::Isolate::Job') ;
+  return if ${$this->{status}} <= 0 ;
   
   {
-    lock( @$the_job ) ;
+    lock( @$the_job ) if !$the_job->is_no_lock ;
     return 1 if $$the_job[2] == 2 ;
   }
   
@@ -350,7 +394,9 @@ sub add_job {
   my $this = shift ;
   my $job_type = shift ;
   
-  my ($jobs , $status) = @$this{qw(jobs status)} ;
+  return if !$this->exists ;
+  
+  my ($jobs) = @$this{qw(jobs)} ;
   
   my $the_job ;
   
@@ -365,7 +411,27 @@ sub add_job {
     
     cond_signal( @$jobs ) ;
   }
+
+  return $the_job ;
+}
+
+###################
+# ADD_JOB_NO_LOCK #
+###################
+
+sub add_job_no_lock {
+  my $this = shift ;
+  my $job_type = shift ;
   
+  return if !$this->exists ;
+  
+  my ($jobs) = @$this{qw(jobs)} ;
+  
+  my $the_job = Thread::Isolate::Job->new( $this , $job_type , @_ ) ;
+  $the_job->set_no_lock ;
+  
+  push(@$jobs , $the_job) ;
+
   return $the_job ;
 }
 
@@ -376,16 +442,19 @@ sub add_job {
 sub wait_job_to_start {
   my $this = shift ;
   my ( $the_job ) = @_ ;
+
   return if !UNIVERSAL::isa($the_job , 'Thread::Isolate::Job') ;
+  return if ${$this->{status}} <= 0 ;
   
   {
     lock( @$the_job ) ;
 
     return 1 if $$the_job[2] >= 1 ;
     
-    while( !cond_timedwait( @$the_job , time+2 ) ) {
-      last if $$the_job[2] >= 1 || ${$this->{status}} <= 0 ;
-    }
+    cond_wait( @$the_job ) ;
+    #while( !cond_timedwait( @$the_job , time+2 ) ) {
+    #  last if $$the_job[2] >= 1 || ${$this->{status}} <= 0 ;
+    #}
   }
   
   threads->yield while $$the_job[2] < 1 && ${$this->{status}} > 0 ;
@@ -399,16 +468,19 @@ sub wait_job_to_start {
 sub wait_job {
   my $this = shift ;
   my ( $the_job ) = @_ ;
+
   return if !UNIVERSAL::isa($the_job , 'Thread::Isolate::Job') ;
+  return if ${$this->{status}} <= 0 ;
   
   {
     lock( @$the_job ) ;
 
     return Thread::Isolate::thaw( $$the_job[4] ) if $$the_job[2] == 2 ;
 
-    while( !cond_timedwait( @$the_job , time+2 ) ) {
-      last if $$the_job[2] == 2 || ${$this->{status}} <= 0 ;
-    }
+    cond_wait( @$the_job ) ;
+    #while( !cond_timedwait( @$the_job , time+2 ) ) {
+    #  last if $$the_job[2] == 2 || ${$this->{status}} <= 0 ;
+    #}
   }
   
   threads->yield while $$the_job[2] != 2 && ${$this->{status}} > 0 ;
@@ -458,6 +530,17 @@ sub call {
   $this->wait_job( $this->call_detached(@_) ) ;
 }
 
+sub call_detached_no_lock {
+  my $this = shift ;
+  return $this->add_job_no_lock('CALL', (wantarray? 1 : 0) , @_) ;
+}
+
+sub call_no_lock {
+  my $this = shift ;
+  $this->wait_job( $this->call_detached_no_lock(@_) ) ;
+}
+
+
 ########
 # EVAL #
 ########
@@ -470,6 +553,16 @@ sub eval_detached {
 sub eval {
   my $this = shift ;
   $this->wait_job( $this->eval_detached(@_) ) ;
+}
+
+sub eval_detached_no_lock {
+  my $this = shift ;
+  return $this->add_job_no_lock('EVAL', (wantarray? 1 : 0) , @_) ;
+}
+
+sub eval_no_lock {
+  my $this = shift ;
+  $this->wait_job( $this->eval_detached_no_lock(@_) ) ;
 }
 
 ############
@@ -538,6 +631,7 @@ sub DESTROY {
   $this->shutdown if $this->tid != threads->self->tid && $this->exists ;
   
   delete $THI_SHARE_TABLE{ $this->{id} } ;
+  delete $THI_THREAD_TABLE{ $this->{tid} } ;
   
   %$this = () ;
   
@@ -567,12 +661,14 @@ sub {
   while( $running && $$status > 0 ) {
     lock( @$jobs ) ;
 
-    #cond_wait( @$jobs ) if !@$jobs ;
-    cond_timedwait( @$jobs , time + 2 ) if !@$jobs ;
+    cond_wait( @$jobs ) if !@$jobs ;
+    #cond_timedwait( @$jobs , time + 2 ) if !@$jobs ;
     
     last if $$status <= 0 ;
 
     ##print threads->self->tid . "> RUN> $this->{id} [$MOTHER_THREAD]\n" ;
+    
+    next if !@$jobs ;
     
     my $the_job = pop(@$jobs) ;
   
@@ -583,12 +679,12 @@ sub {
     $this->process_job($the_job , \$running) ;
   }
   
+  $$status = 0 ;
+
   @{$THI_SHARE_TABLE{ $this->{id} }} = () ;
   delete $THI_SHARE_TABLE{ $this->{id} } ;
   
   ##print "END> $this->{id} [$running , $$status]\n" ;
-  
-  $$status = 0 ;
   
   return ;
 }
@@ -604,12 +700,14 @@ sub process_job {
   my $the_job = shift ;
   my $running = shift ;
 
+  return if !defined $the_job ;
+
   my ($jobs , $job_now , $err) = @$this{qw(jobs job_now err)} ;
   
-  return if !defined $the_job ;
-  
   $$the_job[2] = 1 ;
-  $$job_now = $the_job ;
+
+  ## Hold only id since hold the object creates a strange memory leak!
+  $$job_now = $$the_job[1] ;
   
   my $job_type = $$the_job[3] ;
   my @args = Thread::Isolate::thaw( $$the_job[4] ) ;
@@ -657,7 +755,10 @@ sub process_job {
     $$job_now = undef ;
     cond_signal( @$the_job ) ;
   }
+  
+  $the_job = undef ;
 
+  return 1 ;
 }
 
 ############
@@ -675,20 +776,29 @@ sub job_CALL {
 
 sub END {
 
-  if ( $MOTHER_THREAD ) {
-    my $thim = Thread::Isolate->new_from_id($MOTHER_THREAD) ;
-    $thim->shutdown if $thim && $thim->exists ;
-    $MOTHER_THREAD = undef ;  
-  }
-
   my $tid = threads->self->tid ;
 
   foreach my $Key (sort keys %THI_SHARE_TABLE ) {
+    next if $Key == $MOTHER_THREAD ;
     my $thi = new_from_id($Key) ;
     $thi->shutdown if $thi && $thi->exists ;
   }
+  
+  if ( $MOTHER_THREAD ) {
+    my $thim = Thread::Isolate->new_from_id($MOTHER_THREAD) ;
+    
+    ## exit() from Mother Thread to avoid alerts on Win32:
+    if ( $thim && $thim->exists ) {
+      $thim->eval(' CORE::exit() ;') ;
+      $thim->shutdown ;
+    }
+
+    $MOTHER_THREAD = undef ;
+  }
 
   %THI_SHARE_TABLE = () ;
+  %THI_THREAD_TABLE = () ;
+  
 }
 
 #######
@@ -698,163 +808,4 @@ sub END {
 1;
 
 
-__END__
-
-=head1 NAME
-
-Thread::Isolate - Create Threads that can be called externally and use them to isolate modules from the main thread.
-
-=head1 DESCRIPTION
-
-This module has the main purpose to isolate loaded modules from the main thread.
-
-The idea is to create the I<Thread::Isolate> object and call methods, evaluate
-codes and use modules inside it, with synchronized and unsynchronized calls.
-
-=head1 USAGE
-
-Synchronized calls:
-
-  use Thread::Isolate ;
-  
-  my $thi = Thread::Isolate->new() ;
-
-  $thi->eval(' 2**10 ') ;
-  
-  ...
-  
-  $thi->eval(q`
-    sub TEST {
-      my ( $var ) = @_ ;
-      return $var ** 10 ;
-    }
-  `) ;
-  
-  print $thi->call('TEST' , 2) ;
-
-  ...
-  
-  $thi->use('Data::Dumper') ;
-  
-  print $thi->call('Data::Dumper::Dumper' , [123 , 456 , 789]) ;
-  
-Here's an example of an unsynchronized call (detached):
-
-  my $job = $thi->eval_detached(q`
-    for(1..5) {
-      print "in> $_\n" ;
-      sleep(1);
-    }
-    return 2**3 ;
-  `);
-  
-  $job->wait_to_start ;
-
-  while( $job->is_running ) {
-    print "." ;
-  }
-  
-  print $job->returned ;
-
-=head1 Thread::Isolate METHODS
-
-=head2 new
-
-Create a new Thread::Isolate object.
-
-=head2 use (MODULE , ARGS)
-
-call I<'use MODULE qw(ARGS)'> inside the thread,
-
-=head2 eval (CODE , ARGS)
-
-Evaluate a CODE and paste ARGS inside the thread.
-
-=head2 eval_detached (CODE , ARGS)
-
-Evaluate detached (unsynchronous) a CODE and paste ARGS inside the thread.
-
-Returns a I<Thread::Isolate::Job> object.
-
-=head2 call (FUNCTION , ARGS)
-
-call FUNCTION inside the thread.
-
-=head2 call_detached (FUNCTION , ARGS)
-
-call detached (unsynchronous) FUNCTION inside the thread.
-
-Returns a I<Thread::Isolate::Job> object.
-
-=head2 shutdown
-
-Shutdown the thread.
-
-=head2 exists
-
-Return TRUE if the thread exists.
-
-=head2 is_running_any_job
-
-Return TRUE if the thread is running some job.
-
-=head1 Thread::Isolate::Job METHODS
-
-When a deteched method is called a job is returned.
-Here are the methods to use the job object:
-
-=head2 is_started
-
-Return TRUE if the job was started.
-
-=head2 is_running 
-
-Return TRUE if the job is running.
-
-=head2 is_finished  
-
-Return TRUE if the job was finished.
-
-=head2 wait_to_start  
-
-Wait until the job starts. (Ensure that the job was started).
-
-=head2 wait  
-
-Wait until the job is finished. (Ensure that the job was fully executed).
-
-Returns the arguments returneds by the job.
-
-=head2 wait_to_finish  
-
-Same as I<wait()>.
-
-Wait until the job is finished. (Ensure that the job was fully executed).
-
-Returns the arguments returneds by the job.
-
-=head2 returned
-
-Returns the arguments returneds by the job. It will wait the job to finish too.
-
-=head1 SEE ALSO
-
-L<Thread::Tie::Thread>, L<threads::shared>.
-
-L<Safe::World>.
-
-=head1 AUTHOR
-
-Graciliano M. P. <gmpassos@cpan.org>
-
-I will appreciate any type of feedback (include your opinions and/or suggestions). ;-P
-
-This module was inspirated on L<Thread::Tie::Thread> by Elizabeth Mattijsen, <liz at dijkmat.nl>, the mistress of threads. ;-P
-
-=head1 COPYRIGHT
-
-This program is free software; you can redistribute it and/or
-modify it under the same terms as Perl itself.
-
-=cut
 

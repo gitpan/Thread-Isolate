@@ -14,12 +14,59 @@ package Thread::Isolate ;
 use 5.008003 ;
 
 use strict qw(vars);
+no warnings ;
 
 use vars qw($VERSION @ISA) ;
 
-$VERSION = '0.02' ;
+$VERSION = '0.03' ;
 
 @ISA = qw(Thread::Isolate::Thread) ;
+
+sub BEGIN {
+  *CORE::GLOBAL::exit = \&EXIT ;
+  *CORE::GLOBAL::die = \&DIE ;
+}
+
+#######
+# DIE #
+#######
+
+sub DIE {
+  my $is_exit ;
+  if ( $_[0] =~ /#CORE::GLOBAL::exit#/s ) {
+    my $err = shift ;
+    $err =~ s/#CORE::GLOBAL::exit#/exit()/gsi ; ;
+    unshift (@_, $err) ;
+    $is_exit = 1 ;
+  }
+  
+  if ( $^S ) {
+    Thread::Isolate->self->add_job('SHUTDOWN') ;
+    CORE::die(@_) ;
+  }
+  else {
+    if ( $is_exit ) {
+      Thread::Isolate->new_from_id( $Thread::Isolate::Thread::MOTHER_THREAD )->eval(' CORE::exit() ;') if $Thread::Isolate::Thread::MOTHER_THREAD ;
+      CORE::exit ;
+    }
+    else { warn(@_) ;}
+  }
+}
+
+########
+# EXIT #
+########
+
+sub EXIT {
+  my @call = caller ;
+  if ( $call[1] =~ /^\(eval/ ) {
+    my @call2 = caller(1) ;
+    die("#CORE::GLOBAL::exit# at $call[1] (package $call[0]) line $call[2]:\n$call2[6]\n") ;
+  }
+  else {
+    die("#CORE::GLOBAL::exit# at $call[1] (package $call[0]) line $call[2].\n") ;
+  }
+}
 
 ###########
 # REQUIRE #
@@ -37,6 +84,10 @@ $VERSION = '0.02' ;
 use vars qw($STORABLE_SIGN $NO_EXTERNAL_PERL) ;
 
 BEGIN {
+  return if $STORABLE_SIGN ;
+  
+  ($STORABLE_SIGN , $NO_EXTERNAL_PERL) = ('','') ;
+
   if ( $STORABLE_SIGN eq '' ) {
     if ($NO_EXTERNAL_PERL) {
       $STORABLE_SIGN = unpack( 'l',Storable::freeze( [] )) ;
@@ -285,7 +336,16 @@ Returns the arguments returneds by the job.
 
 Returns the arguments returneds by the job. It will wait the job to finish too.
 
+=head1 Mapping a Thread Package to Another Thread
+
+With L<Thread::Isolate::Map> is possible to Map the package symbols of one thread
+to another, and use this package from many threads without need to load it many times.
+
+I<See L<Thread::Isolate::Map> POD for more.>
+
 =head1 SEE ALSO
+
+L<Thread::Isolate::Map>, L<Thread::Isolate::Pool>.
 
 L<Thread::Tie::Thread>, L<threads::shared>.
 
