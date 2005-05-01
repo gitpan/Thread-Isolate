@@ -1,5 +1,20 @@
 Revision history for Perl extension Thread::Isolate.
 
+0.05  2005-05-01
+      - Added standby jobs.
+      - Fixed wait_job_to_start() lock.
+      - Fixed is_running_any_job() deadlock.
+      - Added pack_call() and pack_eval().
+      - Added detach() method to job.
+      - Added time() attribute to job.
+      - Changed required Perl version to 5.8.6 (was 5.8.3). Less memory leak at 5.8.6.
+      - Added get/set_attr() and get/set_global() to share data between 2 running threads,
+        or to spy the internal status of a thread.
+      - POD improvements.
+      - Added improvements to the process to past data/objects from one thread to another,
+        where now is possible to paste IO/GLOB and objects with CODE references inside.
+
+
 0.04  2005-02-02
       - Fixed memory leak for Perl 5.8.4-Win32 for push() and shift() of shared @{ $this->{jobs} }.
       - Fixed Job destruction in the thread execution side.

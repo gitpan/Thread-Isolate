@@ -16,3 +16,5 @@ t/001_basics.t
 t/002_detached_loop.t
 t/003_pool.t
 t/004_map.t
+t/005_standby.t
+t/006_attr.t

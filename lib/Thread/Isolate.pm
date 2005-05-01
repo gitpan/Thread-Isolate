@@ -11,14 +11,14 @@
 #############################################################################
 
 package Thread::Isolate ;
-use 5.008003 ;
+use 5.008006 ;
 
 use strict qw(vars);
 no warnings ;
 
 use vars qw($VERSION @ISA) ;
 
-$VERSION = '0.04' ;
+$VERSION = '0.05' ;
 
 @ISA = qw(Thread::Isolate::Thread) ;
 
@@ -41,7 +41,8 @@ sub DIE {
   }
   
   if ( $^S ) {
-    Thread::Isolate->self->add_job('SHUTDOWN') ;
+    my $thi = Thread::Isolate->self ;
+    $thi->add_job('SHUTDOWN') if $thi ;
     CORE::die(@_) ;
   }
   else {
@@ -81,23 +82,23 @@ sub EXIT {
 # STORABLE SIGNATURE #
 ######################
 
-use vars qw($STORABLE_SIGN $NO_EXTERNAL_PERL) ;
+use vars qw($STORABLE_SIGN $USE_EXTERNAL_PERL) ;
 
 BEGIN {
   return if $STORABLE_SIGN ;
   
-  ($STORABLE_SIGN , $NO_EXTERNAL_PERL) = ('','') ;
+  ($USE_EXTERNAL_PERL , $STORABLE_SIGN) = ('','') ;
 
   if ( $STORABLE_SIGN eq '' ) {
-    if ($NO_EXTERNAL_PERL) {
+    if (!$USE_EXTERNAL_PERL) {
       $STORABLE_SIGN = unpack( 'l',Storable::freeze( [] )) ;
-      $NO_EXTERNAL_PERL = 'Signature obtained locally' ;
     }
     else {
       open( my $handle,
       qq($^X -MStorable -e "print unpack('l',Storable::freeze( [] ))" | )
       ) or die "Cannot determine Storable signature\n" ;
       $STORABLE_SIGN = <$handle>;
+      $USE_EXTERNAL_PERL = 'Signature obtained with an external Perl!' ;
     }
   }
 }
@@ -109,9 +110,14 @@ BEGIN {
 sub freeze {
   if (@_) {
     foreach (@_) {
-      return Storable::freeze( \@_ ) if !defined() or ref() or m#\0#;
+      if ( !defined() or ref() or m#\0# ) {
+        my ( $stable_tree , $holder ) = make_stable_tree(\@_) ;
+        my $freeze = Storable::freeze($stable_tree) ;
+        make_stable_tree($stable_tree , $holder , 1) ;
+        return $freeze ;
+      }
     }
-    return join( "\0",@_ );
+    return join("\0" , @_) ;
   }
   else { return ;}
 }
@@ -121,19 +127,106 @@ sub freeze {
 ########
 
 sub thaw {
-  return unless defined( $_[0] ) and defined( wantarray );
-
-  if (wantarray) {
-    return @{Storable::thaw( $_[0] )} if (unpack( 'l',$_[0] )||0) == $STORABLE_SIGN ;
-    split( "\0",$_[0] )
-  }
-  elsif ((unpack( 'l',$_[0] )||0) == $STORABLE_SIGN) {
-    Storable::thaw( $_[0] )->[0];
+  return unless defined( $_[0] ) and defined( wantarray ) ;
+  
+  if ( (unpack('l', $_[0]) || 0) == $STORABLE_SIGN ) {
+    my $thaw = Storable::thaw( $_[0] ) ;
+    restore_stable_tree($thaw) ;
+    return wantarray ? @$thaw : $$thaw[0] ;
   }
   else {
-    return $1 if $_[0] =~ m#^([^\0]*)#;
-    $_[0];
+    if (wantarray) {
+      return split("\0" , $_[0]) ;
+    }
+    else {
+      return $1 if $_[0] =~ m#^([^\0]*)# ;
+      return $_[0] ;
+    }
   }
+
+}
+
+####################  
+# MAKE_STABLE_TREE #
+####################
+
+sub make_stable_tree {
+  my $ref = shift ;
+  my $holder = shift(@_) || [] ;
+  my $restore = shift ;
+  
+  if ( !ref $ref ) {
+    return wantarray ? ( $ref , $holder ) : $ref ;
+  }
+  
+  if (ref $ref eq 'GLOB') {
+    push(@$holder , $ref) ;
+    my $fileno = fileno($ref) || '' . *$ref ;
+    $ref = bless(['GLOB' , $fileno] , 'Thread::Isolate::FREEZE') ;
+  }
+  elsif (ref $ref eq 'CODE') {
+    push(@$holder , $ref) ;
+    $ref = bless(['CODE' , undef] , 'Thread::Isolate::FREEZE') ;
+  }
+  
+  if (ref $ref eq 'HASH') {
+    foreach my $Key ( sort keys %$ref ) {
+      &make_stable_tree($$ref{$Key} , $holder , $restore) if ref $$ref{$Key} ;
+    }
+  }
+  elsif (ref $ref eq 'ARRAY') {
+    foreach my $i ( @$ref ) {
+      $i = &make_stable_tree($i , $holder , $restore) if ref $i ;
+    }
+  }
+  elsif (ref $ref eq 'SCALAR' || ref $ref eq 'REF') {
+    $$ref = &make_stable_tree($$ref , $holder , $restore) if ref $$ref ;
+  }
+  elsif (ref $ref eq 'Thread::Isolate::FREEZE') {
+    if ( $restore == 1 ) {
+      $ref = shift @$holder ;
+    }
+    elsif ( $restore == 2 ) {
+      if ( $$ref[0] eq 'GLOB' ) {
+        if ( $$ref[1] =~ /^\d+$/ ) {
+          open(my $fh , "+<&=$$ref[1]") ;
+          $ref = $fh ;
+        }
+        elsif ( $$ref[1] =~ /^\*(.+)/s ) {
+          $ref = \*{$1} ;
+        }
+      }
+      elsif ( $$ref[0] eq 'CODE' ) {
+        $ref = eval('sub {}') ;
+      }
+    }
+  }
+  elsif (ref $ref && UNIVERSAL::isa($ref , 'UNIVERSAL')) {
+    if ( UNIVERSAL::isa($ref , 'HASH') ) {
+      foreach my $Key ( sort keys %$ref ) {
+        $$ref{$Key} = &make_stable_tree($$ref{$Key} , $holder , $restore) if ref $$ref{$Key} ;
+      }
+    }
+    elsif ( UNIVERSAL::isa($ref , 'ARRAY') ) {
+      foreach my $i ( @$ref ) {
+        $i = &make_stable_tree($i , $holder , $restore) if ref $i ;
+      }
+    }
+    elsif ( UNIVERSAL::isa($ref , 'SCALAR') || UNIVERSAL::isa($ref , 'REF') ) {
+      $$ref = &make_stable_tree($$ref , $holder , $restore) if ref $$ref ;
+    }
+  }
+
+  return wantarray ? ( $ref , $holder ) : $ref ;
+}
+
+#######################
+# RESTORE_STABLE_TREE #
+#######################
+
+sub restore_stable_tree {
+  my $stable_tree = shift ;
+  return make_stable_tree($stable_tree , undef , 2) ;
 }
 
 #######
@@ -253,6 +346,22 @@ This can be used to copy/clone threads from external calls.
 
 Returns an already created Thread::Isolate object using the ID.
 
+=head2 self
+
+Returns the current Thread::Isolate object (similar to Perl threads->self call).
+
+=head2 id
+
+Return the ID of the thread. Same that is returned by $thread->id.
+
+I<Thread ID is based in the Thread::Isolate creation of instances>.
+
+=head2 tid
+
+Return the TID of the thread. Same that is returned by $thread->tid.
+
+I<TID is based in the OS and Perl thread implementation>.
+
 =head2 clone
 
 Return a cloned object. (This won't create a new Perl thread, is just a clone of the object reference).
@@ -275,6 +384,37 @@ Evaluate detached (unsynchronous) a CODE and paste ARGS inside the thread.
 
 Returns a I<Thread::Isolate::Job> object.
 
+=head2 err
+
+Return the error ($@) value of the last eval.
+
+=head2 pack_eval (CODE , ARGS)
+
+Evaluate the I<CODE> in the same package of the caller:
+
+  use Class::HPLOO ;
+  
+  class Foo::Bar::Baz {
+    use Thread::Isolate ;
+    
+    my $th_isolate = Thread::Isolate->new() ;
+    
+    $th_isolate->pack_eval(q`
+      sub isolated_function {...}
+    `);
+    
+    ## or:
+    
+    $th_isolate->eval(q`
+      package Foo::Bar::Baz ;
+      sub isolated_function {...}
+    `);
+  }
+
+=head2 pack_eval_detached (CODE , ARGS)
+
+Same as I<pack_eval()> but detached.
+
 =head2 call (FUNCTION , ARGS)
 
 call FUNCTION inside the thread.
@@ -285,9 +425,52 @@ call detached (unsynchronous) FUNCTION inside the thread.
 
 Returns a I<Thread::Isolate::Job> object.
 
+=head2 pack_call (FUNCTION , ARGS)
+
+Call function in the same package of the caller. So, if you call function X from
+package Foo, the result will be the same to call I<call('Foo::X')>. The idea is
+to use that in classes that uses some I<"shared"> code in a I<Thread::Isolate>:
+
+  use Class::HPLOO ;
+  
+  class Foo::Bar::Baz {
+    use Thread::Isolate ;
+    
+    my $th_isolate = Thread::Isolate->new() ;
+    
+    $th_isolate->eval(q`
+      package Foo::Bar::Baz ;
+      
+      open (LOG,"foo.log") ;
+      
+      sub write_lines {
+        print LOG @_ ;
+      }
+    `) ;
+    
+    sub log {
+      my ( $msg ) = @_ ;
+      $th_isolate->pack_call('write_lines' , "LOG> $msg\n") ;
+      ## or:
+      $th_isolate->call('Foo::Bar::Baz::write_lines' , "LOG> $msg\n") ;
+    }
+  
+  }
+
+The code above uses a I<Thread::Isolate> to share a HANDLE (IO) to write
+lines into a log file.
+
+=head2 pack_call_detached (FUNCTION , ARGS)
+
+Same as I<pack_call()> but detached.
+
 =head2 shutdown
 
-Shutdown the thread.
+Shutdown the thread. See also I<kill()>.
+
+=head2 kill
+
+Kill the thread. The difference of shutdown() and kill is that kill will interrupt the current job executation.
 
 =head2 exists
 
@@ -297,10 +480,62 @@ Return TRUE if the thread exists.
 
 Return TRUE if the thread is running some job.
 
+=head2 get_attr( KEY )
+
+Get the value of an internal attribute of the thread.
+
+=head2 set_attr( KEY )
+
+Set the value of an internal attribute of the thread and return it.
+
+=head2 get_global( KEY )
+
+Get the value of a global attribute (shared by all the threads).
+
+=head2 set_global( KEY )
+
+Set the value of a global attribute (shared by all the threads) and return it.
+
 =head1 Thread::Isolate::Job METHODS
 
 When a deteched method is called a job is returned.
 Here are the methods to use the job object:
+
+=head2 id
+
+Return the ID of the job.
+
+=head2 tid
+
+Return the TID of the thread. Same that is returned by $thread->tid.
+
+I<TID is based in the OS and Perl thread implementation>.
+
+=head2 th_id
+
+Return the ID of the thread. Same that is returned by $thread->id.
+
+I<Thread ID is based in the Thread::Isolate creation of instances>.
+
+=head2 dump
+
+Dump the job informations (similar to Data::Dumper).
+
+=head2 type
+
+Return the type of the job.
+
+=head2 args
+
+Return the arguments of the job.
+
+=head2 detach
+
+Detach the job (will not wait to finish the job).
+
+=head2 is_detached
+
+Return TRUE if the job is detached.
 
 =head2 is_started
 
@@ -313,6 +548,10 @@ Return TRUE if the job is running.
 =head2 is_finished  
 
 Return TRUE if the job was finished.
+
+=head2 time
+
+Return the start I<time> of the job.
 
 =head2 wait_to_start  
 
@@ -335,6 +574,15 @@ Returns the arguments returneds by the job.
 =head2 returned
 
 Returns the arguments returneds by the job. It will wait the job to finish too.
+
+=head1 Pasting Data Between Threads
+
+When the methods call() and eval() (and derivations) are called all the sent data
+is freezed (by Storable::freeze()) and in the target thread they are thawed (by Storable::thaw()).
+But Storable can't freeze GLOB and CODE, so Thread::Isolate make a work around to be possible
+to send this kind of references.
+
+For GLOB/IO Thread::Isolate paste it as fileno(), and for CODE a dum sub is paste for now.
 
 =head1 Mapping a Thread Package to Another Thread
 

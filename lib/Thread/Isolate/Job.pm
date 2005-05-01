@@ -39,7 +39,7 @@ sub new {
     $id = ++$$job_id ;
   }
   
-  @$the_job = ( $thi->{id} , $id , undef , $job_type , Thread::Isolate::freeze(@_) ) ;
+  @$the_job = ( $thi->{id} , $id , undef , $job_type , Thread::Isolate::freeze(@_) , time() ) ;
 
   return $this ;
 }
@@ -50,7 +50,7 @@ sub new {
 
 sub set_no_lock {
   my $this = shift ;
-  $$this[5] = 1 ;
+  $$this[6] = 1 ;
 }
 
 #################
@@ -59,7 +59,7 @@ sub set_no_lock {
 
 sub unset_no_lock {
   my $this = shift ;
-  $$this[5] = 0 ;
+  $$this[6] = 0 ;
 }
 
 ##############
@@ -68,7 +68,26 @@ sub unset_no_lock {
 
 sub is_no_lock {
   my $this = shift ;
-  return 1 if $$this[5] ;
+  return 1 if $$this[6] ;
+  return ;
+}
+
+##########
+# DETACH #
+##########
+
+sub detach {
+  my $this = shift ;
+  $$this[7] = $_[0] || 1 ;
+}
+
+###############
+# IS_DETACHED #
+###############
+
+sub is_detached {
+  my $this = shift ;
+  return 1 if $$this[7] ;
   return ;
 }
 
@@ -164,6 +183,37 @@ sub returned {
 }
 
 ########
+# TYPE #
+########
+
+sub type {
+  my $this = shift ;
+  return if $$this[2] == 2 ;
+  return $$this[3] ;
+}
+
+########
+# ARGS #
+########
+
+sub args {
+  my $this = shift ;
+  return if $$this[2] == 2 ;
+  my @args = Thread::Isolate::thaw( $$this[4] ) ;
+  return @args ;
+}
+
+########
+# TIME #
+########
+
+sub time {
+  my $this = shift ;
+  return if $$this[2] == 2 ;
+  return $$this[5] ;
+}
+
+########
 # DUMP #
 ########
 
@@ -176,8 +226,10 @@ sub dump {
   my $done = $$this[2] ;
   my $job_type = $$this[3] ;
   my @args = Thread::Isolate::thaw( $$this[4] ) ;
+  my $no_lock = $$this[6] ;
+  my $detached = $$this[7] ;
   
-  $dump .= "JOB[$tid:$id][$done] TYPE[$job_type]" ;
+  $dump .= "JOB[$tid:$id][$done] TYPE[$job_type] NO_LOCK[$no_lock] DETACHED[$detached]" ;
   
   $dump .= " ARGS[". join (' ', @args) ."]" if @args ;
   
@@ -196,7 +248,7 @@ sub DESTROY {
   return if $this->tid == threads->self->tid ;
   
   { lock( @$this ) ;
-    if ( !$$this[2] && $$this[3] ne 'SHUTDOWN' ) {
+    if ( !$$this[2] && !$$this[7] && $$this[3] ne 'SHUTDOWN' ) {
       $this->wait ;
       $$this[2] = 2 ;
       $$this[4] = '' ;

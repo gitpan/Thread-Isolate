@@ -26,9 +26,18 @@ use warnings qw'all' ;
     }
   `);
   
+  print "----------------------------------------------\n" ;
   my $job1 = $pool->call_detached('test') ; print "#>> $job1 [". ok(!$job1->is_no_lock) ."]\n" ;
   my $job2 = $pool->call_detached('test') ; print "#>> $job2 [". ok(!$job2->is_no_lock) ."]\n" ;
   my $job3 = $pool->call_detached('test') ; print "#>> $job3 [". ok(!$job3->is_no_lock) ."]\n" ;
+  print "----------------------------------------------\n" ;
+
+
+  print "<<<<<<<<<<<<<<<<\n" ;
+  $job1->wait_to_start ;
+  $job2->wait_to_start ;
+  $job3->wait_to_start ;
+  print ">>>>>>>>>>>>>>>>\n" ;
   
   my @i ;
   while( $job1->is_running || $job2->is_running || $job3->is_running ) {
